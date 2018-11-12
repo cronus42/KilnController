@@ -1,0 +1,6 @@
+Bisque Fire
+Cone 04
+by Plainsman
+180,212,60
+270,1760,0
+180,1940,5

@@ -1,0 +1,8 @@
+Slow Glaze Fire
+Cone 6
+by Deanna Ranlett
+100,220,0
+350,2000,0
+150,2185,15
+500,1900,0
+150,1450,0

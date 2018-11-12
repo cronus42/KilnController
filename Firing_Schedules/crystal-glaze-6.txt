@@ -1,0 +1,8 @@
+Crystal Glaze Fire
+Cone 6
+by Plainsman
+316,701,0
+716,1999,0
+117,2210,0
+716,1999,0
+716,1898,0
