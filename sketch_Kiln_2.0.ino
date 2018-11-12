@@ -1,17 +1,32 @@
+
 /* Kiln Controller v2.0
  *   
  */
 
+// Compile time options
+#define VERSION_ADDR 0              // location of the software version in EEPROM
+#define CURRENT_EEPROM_VERSION 1    // Revision of the EEPROM storage structure
+#define DEFAULTS_ADDR 1             //location of defaults in EEPROM
+#define LOG_LEVEL LOG_LEVEL_WARNING // serial logging level
+#define ARRAY_SIZE 10
+char* eepromSchedules[ARRAY_SIZE] = { "Bisque Fire;Cone 04;by Plainsman;180,212,60;270,1760,0;180,1940,5",
+                            "Glaze Fire;Cone 6;by Plainsman;100,220,60;300,1733,0;108,2195,15;150,2095,30",
+                            "Slow Bisque Fire;Cone 04;by Deanna Ranlett;50,150,360;150,200,15;250,1000,0;180,1150,15;300,1800,0;108,1900,5;150,1500,0",
+                            "Slow Glaze Fire;Cone 6;by Deanna Ranlett;100,220,0;350,2000,0;150,2185,15;500,1900,0;150,1450,0"
+                            };       //note this default value will be used if EEPROM isn't programmed
+
 // Libraries to include
+#include <ArduinoLog.h>
 #include <LiquidCrystal_I2C.h>  // LCD display library
 #include <Adafruit_MAX31855.h>
 #include <PID_v1.h>         // PID temp control library
 #include <SPI.h>            // Serial Peripheral Interface library
-#include <avr/pgmspace.h>   // PROGMEM library
+#include <avr/pgmspace.h>   // PROGMEM library 
+#include <EEPROM.h>         // persistent memory across boots
 
 // Setup user variables (CHANGE THESE TO MATCH YOUR SETUP)
 const int lcdRefresh = 2500;           // Refresh rate to update screen when running (ms)
-const int maxTemp = 1600;              // Maximum temperature (degrees).  If reached, will shut down.
+const int maxTemp = 2400;              // Maximum temperature (degrees).  If reached, will shut down.
 const int numZones = 1;                // Number of heating element + thermostat zones (max of 3)
 const int pidCycle = 2500;             // Time for a complete PID on/off cycle for the heating elements (ms)
 double pidInput[numZones];             // Input array for PID loop (actual temp reading from thermocouple).  Don't change.
@@ -33,11 +48,6 @@ const int heaterPin[numZones] = {9};            // Pins connected to relays for 
                                                 // Pins 10 thru 13 are for SD card.  These are automatically setup.
 // LiquidCrystal lcd(19, 18, 17, 16, 15, 14);      // LCD display (connected to analog inputs / reverse order so I don't have to twist ribbon cable)
 LiquidCrystal_I2C lcd(0x27, 20, 4); //I2C LCD
-
-//Set up firing schedules and reference table
-const char schedule_0[] PROGMEM = "Bisque Fire;Cone 04;by Plainsman;180,212,60;270,1760,0;180,1940,5";
-const char schedule_1[] PROGMEM = "Glaze Fire;Cone 6;by Plainsman;100,220,60;300,1733,0;108,2195,15;150,2095,30";
-const char* const schedule_table[] PROGMEM = {schedule_0, schedule_1};
  
 // Setup other variables (DON'T CHANGE THESE)
 double calcSetPoint;        // Calculated set point (degrees)
@@ -62,11 +72,34 @@ boolean segPhase = 0;       // Current segment phase.  0 = ramp.  1 = hold.
 int segRamp[20];            // Rate of temp change for each segment (deg/hr).
 int segTemp[20];            // Target temp for each segment (degrees).
 
+
+
 //******************************************************************************************************************************
 //  SETUP: INITIAL SETUP (RUNS ONCE DURING START)
 //******************************************************************************************************************************
 void setup() {
+  // Initialize Logging
+  Serial.begin(9600);
+  Log.begin(LOG_LEVEL, &Serial);
+  Log.setPrefix(printTimestamp);
+  Log.setSuffix(printNewline);
+  Log.notice(F("Kiln Controller: Starting up")); 
 
+  // Setup EEPROM
+  Log.notice(F("Current EEPROM Version: %i"), CURRENT_EEPROM_VERSION);
+  Log.notice((F("EEPROM Version set to: %i")), EEPROM.read(VERSION_ADDR));
+  if(EEPROM.read(VERSION_ADDR) != CURRENT_EEPROM_VERSION) { // EEprom is wrong version or was not programmed
+    Log.warning(F("EEPROM Version is incorrect or not set")); 
+    EEPROM.put(DEFAULTS_ADDR, eepromSchedules); // write the defaults to the EEprom
+    Log.warning(F("EEPROM Overwritten with defaults")); 
+    EEPROM.write(VERSION_ADDR, CURRENT_EEPROM_VERSION); // record current EEprom version
+    delay(200); // Stall until the write is done
+    Log.warning(F("EEPROM Version set to: %i"), (int) EEPROM.read(VERSION_ADDR));
+  } else {  // EEprom version matches current
+    EEPROM.get(DEFAULTS_ADDR, eepromSchedules); // overwrite default values with current eeprom
+    Log.notice(F("EEPROM versions match. Pulling schedules from EEPROM."));
+  }
+  
   // Setup all pin modes on board.  Remove INPUT_PULLUP if you have resistors in your wiring.
   pinMode(upPin, INPUT_PULLUP);
   pinMode(downPin, INPUT_PULLUP);
@@ -140,7 +173,8 @@ void loop() {
       lcd.setCursor(2, 2);
       lcd.print(F("Max temp reached"));
       lcd.setCursor(0, 3);
-      lcd.print(F("System was shut down"));    
+      lcd.print(F("KILN OVERHEAT"));
+      Log.error(F("KILN OVERHEAT: ATTEMPTING EMERGENCY SHUTDOWN"));
       shutDown();
     }
   }
@@ -157,7 +191,7 @@ void loop() {
     }
     
     // Down arrow button
-    if (digitalRead(downPin) == LOW) {
+    if (digitalRead(downPin) == LOW && schedNum < ARRAY_SIZE) {
       schedNum = schedNum + 1;
       openSched();
       btnBounce(downPin);          
@@ -317,7 +351,7 @@ int intLength(int myInt) {
 
 
 //******************************************************************************************************************************
-//  split stings without pain
+//  Utilities
 //******************************************************************************************************************************
 String getValue(String data, char separator, int index)
 {
@@ -335,6 +369,17 @@ String getValue(String data, char separator, int index)
     return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
 
+void printTimestamp(Print* _logOutput) {
+  char c[12];
+  int m = sprintf(c, "%10lu ", millis());
+  _logOutput->print(c);
+}
+
+void printNewline(Print* _logOutput) {
+  _logOutput->print('\n');
+}
+
+
 
 //******************************************************************************************************************************
 //  OPENSCHED: OPEN AND LOAD A FIRING SCHEDULE FILE / DISPLAY ON SCREEN
@@ -348,11 +393,8 @@ void openSched() {
   int tempLoc = 0;      // Current location of next character to place in tempLine array
   char schedDesc2[21];  // Schedule description #2 (second line of text file)
   char schedDesc3[21];  // Schedule description #3 (third line of text file)
-  char mySchedule[128];
+  char* mySchedule = eepromSchedules[schedNum];
   String line;
-
-  // copy the schedule from PROGMEM to mySchedule string
-  strcpy_P(mySchedule, (char*)pgm_read_word(&(schedule_table[schedNum])));
 
   // Clear the arrays
   memset(schedDesc1, 0, sizeof(schedDesc1));
@@ -360,8 +402,7 @@ void openSched() {
   memset(segTemp, 0, sizeof(segTemp)); 
   memset(segHold, 0, sizeof(segHold));  
 
-
-  if (mySchedule == false) {
+  if (strcmp(mySchedule, "") == 0) {
     lcd.clear();
     lcd.print(F("SELECT SCHEDULE: "));
     lcd.print(schedNum);
@@ -374,9 +415,10 @@ void openSched() {
   // Break down the schedule string by semicolons
   // Store the first three lines in the description
   // Break the rest up by commas and store the triplets in the seg* vars
-  for (int i = 0; i <= 8; i++) { // 8 is arbitrary
-    line = getValue(mySchedule,';',i);
+  for (int i = 0; i <= 20; i++) { // 20 is arbitrary
+    line = getValue(String(mySchedule),';',i);
     if (strcmp(line.c_str(), "")) { // ignore empty sets
+      Log.trace(F("Current EEPROM contents: %s"), line.c_str());
       if (i == 0) {
         memcpy(schedDesc1, line.c_str(), 21);
       } else if (i == 1) {
@@ -392,13 +434,11 @@ void openSched() {
       row = i + 1;
       }
   }
-  
 
-  // Set some variables
-  lastSeg = row - 3;
   schedOK = true;
 
   // Fix Ramp values so it will show the correct sign (+/-).  This will help to determine when to start hold.
+  lastSeg = row - 3;
   for (i = 0; i < lastSeg; i++) {
     segRamp[i] = abs(segRamp[i]);
     if (i >= 1) {
@@ -408,8 +448,6 @@ void openSched() {
     }
   } 
   
-  sprintf(tempLine, "%d.txt", schedNum);
-
   // Display on the screen
   lcd.clear();
   lcd.print(F("SELECT SCHEDULE: "));
@@ -465,6 +503,7 @@ void shutDown() {
   for (i = 0; i < numZones; i++) {
     digitalWrite(heaterPin[i], LOW);
   }
+  Log.notice(F("Kiln Controller: Starting up")); 
   
   // Disable interrupts / Infinite loop
   cli();
